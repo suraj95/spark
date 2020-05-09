@@ -17,8 +17,8 @@
 
 package org.apache.spark.storage
 
-import scala.collection.Iterable
 import scala.collection.generic.CanBuildFrom
+import scala.collection.immutable.Iterable
 import scala.concurrent.Future
 
 import org.apache.spark.{SparkConf, SparkException}
@@ -167,10 +167,12 @@ class BlockManagerMaster(
    * amount of remaining memory.
    */
   def getMemoryStatus: Map[BlockManagerId, (Long, Long)] = {
+    if (driverEndpoint == null) return Map.empty
     driverEndpoint.askSync[Map[BlockManagerId, (Long, Long)]](GetMemoryStatus)
   }
 
   def getStorageStatus: Array[StorageStatus] = {
+    if (driverEndpoint == null) return Array.empty
     driverEndpoint.askSync[Array[StorageStatus]](GetStorageStatus)
   }
 
@@ -201,7 +203,7 @@ class BlockManagerMaster(
         Option[BlockStatus],
         Iterable[Option[BlockStatus]]]]
     val blockStatus = timeout.awaitResult(
-      Future.sequence[Option[BlockStatus], Iterable](futures)(cbf, ThreadUtils.sameThread))
+      Future.sequence(futures)(cbf, ThreadUtils.sameThread))
     if (blockStatus == null) {
       throw new SparkException("BlockManager returned null for BlockStatus query: " + blockId)
     }

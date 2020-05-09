@@ -30,6 +30,7 @@ import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.CalendarInterval
 
 class TypeCoercionSuite extends AnalysisTest {
+  import TypeCoercionSuite._
 
   // scalastyle:off line.size.limit
   // The following table shows all implicit data type conversions that are not visible to the user.
@@ -98,22 +99,6 @@ class TypeCoercionSuite extends AnalysisTest {
       CreateMap(Seq(Literal.create(null, keyDataType), Literal.create(null, valueDataType)))
     case _ => Literal.create(null, dataType)
   }
-
-  val integralTypes: Seq[DataType] =
-    Seq(ByteType, ShortType, IntegerType, LongType)
-  val fractionalTypes: Seq[DataType] =
-    Seq(DoubleType, FloatType, DecimalType.SYSTEM_DEFAULT, DecimalType(10, 2))
-  val numericTypes: Seq[DataType] = integralTypes ++ fractionalTypes
-  val atomicTypes: Seq[DataType] =
-    numericTypes ++ Seq(BinaryType, BooleanType, StringType, DateType, TimestampType)
-  val complexTypes: Seq[DataType] =
-    Seq(ArrayType(IntegerType),
-      ArrayType(StringType),
-      MapType(StringType, StringType),
-      new StructType().add("a1", StringType),
-      new StructType().add("a1", StringType).add("a2", IntegerType))
-  val allTypes: Seq[DataType] =
-    atomicTypes ++ complexTypes ++ Seq(NullType, CalendarIntervalType)
 
   // Check whether the type `checkedType` can be cast to all the types in `castableTypes`,
   // but cannot be cast to the other types in `allTypes`.
@@ -468,9 +453,19 @@ class TypeCoercionSuite extends AnalysisTest {
       Some(ArrayType(IntegerType, containsNull = true)))
 
     widenTest(
+      ArrayType(NullType, containsNull = true),
+      ArrayType(IntegerType, containsNull = false),
+      Some(ArrayType(IntegerType, containsNull = true)))
+
+    widenTest(
       MapType(IntegerType, StringType, valueContainsNull = true),
       MapType(IntegerType, StringType, valueContainsNull = false),
       Some(MapType(IntegerType, StringType, valueContainsNull = true)))
+
+    widenTest(
+      MapType(NullType, NullType, true),
+      MapType(IntegerType, StringType, false),
+      Some(MapType(IntegerType, StringType, true)))
 
     widenTest(
       new StructType()
@@ -479,6 +474,31 @@ class TypeCoercionSuite extends AnalysisTest {
         .add("arr", ArrayType(IntegerType, containsNull = false), nullable = true),
       Some(new StructType()
         .add("arr", ArrayType(IntegerType, containsNull = true), nullable = true)))
+
+    widenTest(
+      new StructType()
+        .add("null", NullType, nullable = true),
+      new StructType()
+        .add("null", IntegerType, nullable = false),
+      Some(new StructType()
+        .add("null", IntegerType, nullable = true)))
+
+    widenTest(
+      ArrayType(NullType, containsNull = false),
+      ArrayType(IntegerType, containsNull = false),
+      Some(ArrayType(IntegerType, containsNull = false)))
+
+    widenTest(MapType(NullType, NullType, false),
+      MapType(IntegerType, StringType, false),
+      Some(MapType(IntegerType, StringType, false)))
+
+    widenTest(
+      new StructType()
+        .add("null", NullType, nullable = false),
+      new StructType()
+        .add("null", IntegerType, nullable = false),
+      Some(new StructType()
+        .add("null", IntegerType, nullable = false)))
   }
 
   test("wider common type for decimal and array") {
@@ -710,8 +730,6 @@ class TypeCoercionSuite extends AnalysisTest {
   }
 
   test("cast NullType for expressions that implement ExpectsInputTypes") {
-    import TypeCoercionSuite._
-
     ruleTest(TypeCoercion.ImplicitTypeCasts,
       AnyTypeUnaryExpression(Literal.create(null, NullType)),
       AnyTypeUnaryExpression(Literal.create(null, NullType)))
@@ -722,8 +740,6 @@ class TypeCoercionSuite extends AnalysisTest {
   }
 
   test("cast NullType for binary operators") {
-    import TypeCoercionSuite._
-
     ruleTest(TypeCoercion.ImplicitTypeCasts,
       AnyTypeBinaryOperator(Literal.create(null, NullType), Literal.create(null, NullType)),
       AnyTypeBinaryOperator(Literal.create(null, NullType), Literal.create(null, NullType)))
@@ -1425,7 +1441,7 @@ class TypeCoercionSuite extends AnalysisTest {
 
   test("SPARK-15776 Divide expression's dataType should be casted to Double or Decimal " +
     "in aggregation function like sum") {
-    val rules = Seq(FunctionArgumentConversion, Division(conf))
+    val rules = Seq(FunctionArgumentConversion, Division)
     // Casts Integer to Double
     ruleTest(rules, sum(Divide(4, 3)), sum(Divide(Cast(4, DoubleType), Cast(3, DoubleType))))
     // Left expression is Double, right expression is Int. Another rule ImplicitTypeCasts will
@@ -1444,33 +1460,10 @@ class TypeCoercionSuite extends AnalysisTest {
   }
 
   test("SPARK-17117 null type coercion in divide") {
-    val rules = Seq(FunctionArgumentConversion, Division(conf), ImplicitTypeCasts)
+    val rules = Seq(FunctionArgumentConversion, Division, ImplicitTypeCasts)
     val nullLit = Literal.create(null, NullType)
     ruleTest(rules, Divide(1L, nullLit), Divide(Cast(1L, DoubleType), Cast(nullLit, DoubleType)))
     ruleTest(rules, Divide(nullLit, 1L), Divide(Cast(nullLit, DoubleType), Cast(1L, DoubleType)))
-  }
-
-  test("SPARK-28395 Division operator support integral division") {
-    val rules = Seq(FunctionArgumentConversion, Division(conf))
-    Seq(SQLConf.Dialect.SPARK, SQLConf.Dialect.POSTGRESQL).foreach { dialect =>
-      withSQLConf(SQLConf.DIALECT.key -> dialect.toString) {
-        val result1 = if (dialect == SQLConf.Dialect.POSTGRESQL) {
-          IntegralDivide(1L, 1L)
-        } else {
-          Divide(Cast(1L, DoubleType), Cast(1L, DoubleType))
-        }
-        ruleTest(rules, Divide(1L, 1L), result1)
-        val result2 = if (dialect == SQLConf.Dialect.POSTGRESQL) {
-          IntegralDivide(1, Cast(1, ShortType))
-        } else {
-          Divide(Cast(1, DoubleType), Cast(Cast(1, ShortType), DoubleType))
-        }
-        ruleTest(rules, Divide(1, Cast(1, ShortType)), result2)
-
-        ruleTest(rules, Divide(1L, 1D), Divide(Cast(1L, DoubleType), Cast(1D, DoubleType)))
-        ruleTest(rules, Divide(Decimal(1.1), 1L), Divide(Decimal(1.1), 1L))
-      }
-    }
   }
 
   test("binary comparison with string promotion") {
@@ -1548,10 +1541,44 @@ class TypeCoercionSuite extends AnalysisTest {
       Multiply(CaseWhen(Seq((EqualTo(1, 2), Cast(1, DecimalType(34, 24)))),
         Cast(100, DecimalType(34, 24))), Cast(1, IntegerType)))
   }
+
+  test("SPARK-31468: null types should be casted to decimal types in ImplicitTypeCasts") {
+    Seq(AnyTypeBinaryOperator(_, _), NumericTypeBinaryOperator(_, _)).foreach { binaryOp =>
+      // binaryOp(decimal, null) case
+      ruleTest(TypeCoercion.ImplicitTypeCasts,
+        binaryOp(Literal.create(null, DecimalType.SYSTEM_DEFAULT),
+          Literal.create(null, NullType)),
+        binaryOp(Literal.create(null, DecimalType.SYSTEM_DEFAULT),
+          Cast(Literal.create(null, NullType), DecimalType.SYSTEM_DEFAULT)))
+
+      // binaryOp(null, decimal) case
+      ruleTest(TypeCoercion.ImplicitTypeCasts,
+        binaryOp(Literal.create(null, NullType),
+          Literal.create(null, DecimalType.SYSTEM_DEFAULT)),
+        binaryOp(Cast(Literal.create(null, NullType), DecimalType.SYSTEM_DEFAULT),
+          Literal.create(null, DecimalType.SYSTEM_DEFAULT)))
+    }
+  }
 }
 
 
 object TypeCoercionSuite {
+
+  val integralTypes: Seq[DataType] =
+    Seq(ByteType, ShortType, IntegerType, LongType)
+  val fractionalTypes: Seq[DataType] =
+    Seq(DoubleType, FloatType, DecimalType.SYSTEM_DEFAULT, DecimalType(10, 2))
+  val numericTypes: Seq[DataType] = integralTypes ++ fractionalTypes
+  val atomicTypes: Seq[DataType] =
+    numericTypes ++ Seq(BinaryType, BooleanType, StringType, DateType, TimestampType)
+  val complexTypes: Seq[DataType] =
+    Seq(ArrayType(IntegerType),
+      ArrayType(StringType),
+      MapType(StringType, StringType),
+      new StructType().add("a1", StringType),
+      new StructType().add("a1", StringType).add("a2", IntegerType))
+  val allTypes: Seq[DataType] =
+    atomicTypes ++ complexTypes ++ Seq(NullType, CalendarIntervalType)
 
   case class AnyTypeUnaryExpression(child: Expression)
     extends UnaryExpression with ExpectsInputTypes with Unevaluable {

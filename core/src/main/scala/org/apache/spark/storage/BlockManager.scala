@@ -478,7 +478,8 @@ private[spark] class BlockManager(
     }
 
     hostLocalDirManager =
-      if (conf.get(config.SHUFFLE_HOST_LOCAL_DISK_READING_ENABLED)) {
+      if (conf.get(config.SHUFFLE_HOST_LOCAL_DISK_READING_ENABLED) &&
+          !conf.get(config.SHUFFLE_USE_OLD_FETCH_PROTOCOL)) {
         externalBlockStoreClient.map { blockStoreClient =>
           new HostLocalDirManager(
             futureExecutionContext,
@@ -665,7 +666,11 @@ private[spark] class BlockManager(
         // stream.
         channel.close()
         val blockSize = channel.getCount
-        TempFileBasedBlockStoreUpdater(blockId, level, classTag, tmpFile, blockSize).save()
+        val blockStored = TempFileBasedBlockStoreUpdater(
+          blockId, level, classTag, tmpFile, blockSize).save()
+        if (!blockStored) {
+          throw new Exception(s"Failure while trying to store block $blockId on $blockManagerId.")
+        }
       }
 
       override def onFailure(streamId: String, cause: Throwable): Unit = {
